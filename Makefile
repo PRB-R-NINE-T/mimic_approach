@@ -1,15 +1,20 @@
-.PHONY: install precompute train-stage1 train-stage2 evaluate train-all clean help
+.PHONY: login install precompute train-stage1 train-stage2 evaluate train-all clean help
 
 DEVICE ?= cuda
 PRECOMPUTED_DIR ?= precomputed
 STAGE1_CKPT ?= checkpoints/stage1/final
 STAGE2_CKPT ?= checkpoints/stage2/final
+HF_TOKEN ?= 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
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-install: ## Install all dependencies
+login: ## Authenticate with HuggingFace
+	huggingface-cli login --token $(HF_TOKEN)
+
+install: ## Install all dependencies and log in to HuggingFace
 	pip install -r requirements.txt
+	$(MAKE) login
 
 precompute: ## Precompute T5 embeddings (and optionally VAE latents with LATENTS=1)
 ifdef LATENTS
