@@ -4,7 +4,7 @@ DEVICE ?= cuda
 PRECOMPUTED_DIR ?= precomputed
 STAGE1_CKPT ?= checkpoints/stage1/final
 STAGE2_CKPT ?= checkpoints/stage2/final
-HF_TOKEN ?= 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
+HF_TOKEN ?= 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
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
