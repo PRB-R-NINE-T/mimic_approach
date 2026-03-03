@@ -127,6 +127,8 @@ def main():
     val_dataset = MimicVideoDataset(
         repo_id=data_config.repo_id,
         camera_names=data_config.camera_names,
+        state_keys=data_config.state_keys,
+        action_keys=data_config.action_keys,
         num_pixel_frames=data_config.num_pixel_frames,
         action_chunk_size=data_config.action_chunk_size,
         action_dim=data_config.action_dim,

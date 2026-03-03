@@ -45,6 +45,8 @@ def main():
     train_dataset = MimicVideoDataset(
         repo_id=data_config.repo_id,
         camera_names=data_config.camera_names,
+        state_keys=data_config.state_keys,
+        action_keys=data_config.action_keys,
         num_pixel_frames=data_config.num_pixel_frames,
         action_chunk_size=data_config.action_chunk_size,
         action_dim=data_config.action_dim,
@@ -77,6 +79,9 @@ def main():
         dtype=torch.bfloat16,
         device=args.device,
     )
+
+    # Enable gradient checkpointing for memory efficiency
+    backbone.transformer.base_model.model.enable_gradient_checkpointing()
 
     # Move transformer to GPU, offload VAE/T5 to CPU
     backbone.transformer.to(args.device)

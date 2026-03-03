@@ -1,53 +1,76 @@
-"""Image transforms for mimic-video: 2x2 camera concat and normalization."""
+"""Image transforms for mimic-video: camera concat and normalization."""
 
 import torch
 import torch.nn.functional as F
 from typing import List
 
 
-def concat_cameras_2x2(
+def concat_cameras(
     images: List[torch.Tensor],
     target_height: int = 480,
     target_width: int = 640,
 ) -> torch.Tensor:
-    """Stack 4 camera images into a 2x2 grid and resize back to target resolution.
+    """Stack camera images into a grid and resize back to target resolution.
+
+    Supports 3 cameras (top-left, top-right, bottom-center) or 4 cameras (2x2 grid).
 
     Args:
-        images: List of 4 tensors, each [C, H, W] or [T, C, H, W].
+        images: List of 3 or 4 tensors, each [C, H, W] or [T, C, H, W].
         target_height: Output height after resize.
         target_width: Output width after resize.
 
     Returns:
         Tensor of shape [C, target_height, target_width] or [T, C, target_height, target_width].
     """
-    assert len(images) == 4, f"Expected 4 cameras, got {len(images)}"
+    n = len(images)
+    assert n in (3, 4), f"Expected 3 or 4 cameras, got {n}"
 
     has_time = images[0].ndim == 4
-    if has_time:
-        # [T, C, H, W] for each camera -> 2x2 grid -> resize per frame
-        top = torch.cat([images[0], images[1]], dim=-1)   # [T, C, H, 2W]
-        bottom = torch.cat([images[2], images[3]], dim=-1) # [T, C, H, 2W]
-        grid = torch.cat([top, bottom], dim=-2)            # [T, C, 2H, 2W]
 
+    if n == 4:
+        if has_time:
+            top = torch.cat([images[0], images[1]], dim=-1)
+            bottom = torch.cat([images[2], images[3]], dim=-1)
+            grid = torch.cat([top, bottom], dim=-2)
+        else:
+            top = torch.cat([images[0], images[1]], dim=-1)
+            bottom = torch.cat([images[2], images[3]], dim=-1)
+            grid = torch.cat([top, bottom], dim=-2)
+    else:
+        # 3 cameras: top row has 2, bottom row has 1 centered with black padding
+        if has_time:
+            T, C, H, W = images[0].shape
+            top = torch.cat([images[0], images[1]], dim=-1)  # [T, C, H, 2W]
+            pad_left = torch.zeros(T, C, H, W // 2, device=images[2].device, dtype=images[2].dtype)
+            pad_right = torch.zeros(T, C, H, W - W // 2, device=images[2].device, dtype=images[2].dtype)
+            bottom = torch.cat([pad_left, images[2], pad_right], dim=-1)  # [T, C, H, 2W]
+            grid = torch.cat([top, bottom], dim=-2)  # [T, C, 2H, 2W]
+        else:
+            C, H, W = images[0].shape
+            top = torch.cat([images[0], images[1]], dim=-1)
+            pad_left = torch.zeros(C, H, W // 2, device=images[2].device, dtype=images[2].dtype)
+            pad_right = torch.zeros(C, H, W - W // 2, device=images[2].device, dtype=images[2].dtype)
+            bottom = torch.cat([pad_left, images[2], pad_right], dim=-1)
+            grid = torch.cat([top, bottom], dim=-2)
+
+    # Resize to target
+    if has_time:
         T, C = grid.shape[:2]
-        # Batch resize: treat T*C as batch dim for F.interpolate
-        grid_flat = grid.reshape(T * C, grid.shape[2], grid.shape[3]).unsqueeze(1)  # [T*C, 1, 2H, 2W]
+        grid_flat = grid.reshape(T * C, grid.shape[2], grid.shape[3]).unsqueeze(1)
         grid_resized = F.interpolate(
             grid_flat, size=(target_height, target_width), mode="bilinear", align_corners=False
-        )  # [T*C, 1, H, W]
+        )
         return grid_resized.reshape(T, C, target_height, target_width)
     else:
-        # [C, H, W] for each camera
-        top = torch.cat([images[0], images[1]], dim=-1)   # [C, H, 2W]
-        bottom = torch.cat([images[2], images[3]], dim=-1) # [C, H, 2W]
-        grid = torch.cat([top, bottom], dim=-2)            # [C, 2H, 2W]
-
-        # Resize to target
-        grid = grid.unsqueeze(0)  # [1, C, 2H, 2W]
+        grid = grid.unsqueeze(0)
         grid = F.interpolate(
             grid, size=(target_height, target_width), mode="bilinear", align_corners=False
         )
-        return grid.squeeze(0)  # [C, H, W]
+        return grid.squeeze(0)
+
+
+# Keep old name as alias for backward compat
+concat_cameras_2x2 = concat_cameras
 
 
 def normalize_to_neg1_pos1(images: torch.Tensor) -> torch.Tensor:

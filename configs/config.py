@@ -16,10 +16,9 @@ class DataConfig:
     camera_width: int = 640
     camera_names: List[str] = field(
         default_factory=lambda: [
-            "observation.images.head",
-            "observation.images.hand_left",
-            "observation.images.hand_right",
-            "observation.images.side",
+            "observation.images.cam_left_high",
+            "observation.images.cam_right_high",
+            "observation.images.cam_left_wrist",
         ]
     )
 
@@ -29,6 +28,24 @@ class DataConfig:
     num_cond_latent_frames: int = 2
     num_pred_latent_frames: int = 3
     fps: int = 30
+
+    # State/Action feature keys (will be concatenated)
+    state_keys: List[str] = field(
+        default_factory=lambda: [
+            "observation.left_arm",
+            "observation.right_arm",
+            "observation.left_gripper",
+            "observation.right_gripper",
+        ]
+    )
+    action_keys: List[str] = field(
+        default_factory=lambda: [
+            "action.left_arm",
+            "action.right_arm",
+            "action.left_gripper",
+            "action.right_gripper",
+        ]
+    )
 
     # Actions
     action_chunk_size: int = 16
@@ -85,10 +102,10 @@ class ModelConfig:
 @dataclass
 class Stage1Config:
     lr: float = 1e-4
-    warmup_steps: int = 1000
+    warmup_steps: int = 10
     weight_decay: float = 0.1
     grad_clip: float = 10.0
-    total_steps: int = 27000
+    total_steps: int = 100
     batch_size: int = 256  # effective batch size via accumulation
     micro_batch_size: int = 1
     gradient_accumulation_steps: int = 256
@@ -102,7 +119,7 @@ class Stage1Config:
 
     # Logging
     log_every: int = 10
-    save_every: int = 1000
+    save_every: int = 50
     output_dir: str = "checkpoints/stage1"
     wandb_project: str = "mimic-video"
     wandb_run_name: str = "stage1-lora"
@@ -111,10 +128,10 @@ class Stage1Config:
 @dataclass
 class Stage2Config:
     lr: float = 1e-4
-    warmup_steps: int = 1000
+    warmup_steps: int = 10
     weight_decay: float = 0.1
     grad_clip: float = 10.0
-    total_steps: int = 26000
+    total_steps: int = 100
     batch_size: int = 32  # effective batch size
     micro_batch_size: int = 1
     gradient_accumulation_steps: int = 32
@@ -132,7 +149,7 @@ class Stage2Config:
 
     # Logging
     log_every: int = 10
-    save_every: int = 1000
+    save_every: int = 50
     output_dir: str = "checkpoints/stage2"
     wandb_project: str = "mimic-video"
     wandb_run_name: str = "stage2-action-decoder"

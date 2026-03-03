@@ -68,6 +68,11 @@ class CosmosVideoBackbone(nn.Module):
 
     def _load_pipeline(self, model_id: str, dtype: torch.dtype):
         """Load the Cosmos pipeline and extract components."""
+        import diffusers.pipelines.cosmos.pipeline_cosmos2_video2world as _cosmos_mod
+
+        # Stub out CosmosSafetyChecker to avoid needing the gated Guardrail repo
+        _cosmos_mod.CosmosSafetyChecker = lambda *a, **kw: None
+
         from diffusers import Cosmos2VideoToWorldPipeline
 
         pipeline = Cosmos2VideoToWorldPipeline.from_pretrained(
@@ -75,6 +80,9 @@ class CosmosVideoBackbone(nn.Module):
             torch_dtype=dtype,
             safety_checker=None,
         )
+
+        # cosmos_guardrail import disables grad globally - re-enable it
+        torch.set_grad_enabled(True)
 
         # Extract components
         self.transformer = pipeline.transformer

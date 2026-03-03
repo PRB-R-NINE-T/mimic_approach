@@ -93,7 +93,7 @@ def precompute_vae_latents(
     """
     from diffusers import AutoencoderKLWan
     from mimic_video.data.dataset import MimicVideoDataset
-    from mimic_video.data.transforms import concat_cameras_2x2, normalize_to_neg1_pos1
+    from mimic_video.data.transforms import concat_cameras, normalize_to_neg1_pos1
 
     print(f"Loading VAE from {model_id}...")
     vae = AutoencoderKLWan.from_pretrained(
@@ -110,6 +110,8 @@ def precompute_vae_latents(
     dataset = MimicVideoDataset(
         repo_id=data_config.repo_id,
         camera_names=data_config.camera_names,
+        state_keys=data_config.state_keys,
+        action_keys=data_config.action_keys,
         num_pixel_frames=data_config.num_pixel_frames,
         action_chunk_size=data_config.action_chunk_size,
         action_dim=data_config.action_dim,
