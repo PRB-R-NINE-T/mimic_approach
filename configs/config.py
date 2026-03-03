@@ -108,8 +108,8 @@ class Stage1Config:
     grad_clip: float = 10.0
     total_steps: int = 27000
     batch_size: int = 256  # effective batch size via accumulation
-    micro_batch_size: int = 1
-    gradient_accumulation_steps: int = 256
+    micro_batch_size: int = 4
+    gradient_accumulation_steps: int = 64
 
     # LR schedule: constant after warmup
     lr_schedule: str = "constant"
@@ -134,8 +134,8 @@ class Stage2Config:
     grad_clip: float = 10.0
     total_steps: int = 26000
     batch_size: int = 32  # effective batch size
-    micro_batch_size: int = 1
-    gradient_accumulation_steps: int = 32
+    micro_batch_size: int = 4
+    gradient_accumulation_steps: int = 8
 
     # LR schedule: linear decay after warmup
     lr_schedule: str = "linear_decay"
