@@ -25,6 +25,11 @@ def main():
     parser.add_argument("--precomputed_dir", type=str, default="precomputed/")
     args = parser.parse_args()
 
+    # Enable performance optimizations for Ada/Ampere+ GPUs
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+
     data_config = DataConfig()
     model_config = ModelConfig()
     train_config = Stage1Config()
@@ -86,6 +91,15 @@ def main():
     # Move transformer to GPU, offload VAE/T5 to CPU
     backbone.transformer.to(args.device)
     backbone.offload_vae_and_text_encoder("cpu")
+
+    # Compile transformer for faster fwd/bwd (Ada GPU supports it well)
+    # Use default mode — reduce-overhead uses CUDA graphs which conflict with grad checkpointing + LoRA
+    print("Compiling transformer with torch.compile...")
+    backbone.transformer = torch.compile(backbone.transformer)
+
+    # Compile VAE for faster encoding (frozen, no grad)
+    print("Compiling VAE with torch.compile...")
+    backbone.vae = torch.compile(backbone.vae)
 
     # Print trainable parameters
     trainable = sum(p.numel() for p in backbone.transformer.parameters() if p.requires_grad)

@@ -6,6 +6,7 @@ using flow matching, conditioned on past frames and text embeddings.
 
 import os
 import math
+import time
 import torch
 import torch.nn as nn
 import numpy as np
@@ -115,19 +116,23 @@ class Stage1Trainer:
             batch: Dict with "video" [B, T, C, H, W] frames in [-1, 1].
 
         Returns:
-            Dict with loss metrics.
+            Dict with loss metrics and timing info.
         """
+        timings = {}
+
+        t0 = time.time()
         video = batch["video"]  # [B, T, C, H, W]
         B = video.shape[0]
 
         # Rearrange to [B, C, T, H, W] for VAE
         video = video.permute(0, 2, 1, 3, 4).to(self.device)
+        timings["data_to_gpu"] = time.time() - t0
 
-        # Encode with VAE (frozen, no grad)
+        # Encode with VAE (frozen, no grad) — VAE stays on GPU
+        t0 = time.time()
         with torch.no_grad():
-            self.backbone.move_vae_to(self.device)
             z_0 = self.backbone.encode_video(video)  # [B, C_lat, T_lat, H_lat, W_lat]
-            self.backbone.offload_vae_and_text_encoder("cpu")
+        timings["vae_encode"] = time.time() - t0
 
         # Split into conditioning and prediction
         z_cond = z_0[:, :, :self.num_cond_latent_frames]   # [B, C, T_cond, H, W]
@@ -151,6 +156,7 @@ class Stage1Trainer:
             raise ValueError("No T5 embedding available. Either precompute or include in batch.")
 
         # Forward through transformer (LoRA active)
+        t0 = time.time()
         with torch.amp.autocast("cuda", dtype=self.compute_dtype):
             raw_output, _ = self.backbone.forward_transformer(
                 z_noisy=z_noisy,
@@ -158,6 +164,7 @@ class Stage1Trainer:
                 tau_v=tau_v,
                 encoder_hidden_states=t5_emb,
             )
+        timings["transformer_fwd"] = time.time() - t0
 
         # The raw output of the Cosmos network IS the velocity v = eps - x_0
         # We only compute loss on the prediction frames (not conditioning frames)
@@ -170,34 +177,67 @@ class Stage1Trainer:
         # Scale loss for gradient accumulation
         loss = loss / self.gradient_accumulation_steps
 
+        t0 = time.time()
         loss.backward()
+        timings["backward"] = time.time() - t0
 
-        return {"loss": loss.item() * self.gradient_accumulation_steps}
+        return {"loss": loss.item() * self.gradient_accumulation_steps, "timings": timings}
 
     def train(self):
         """Run the full training loop."""
         self.backbone.transformer.train()
         self.backbone.vae.eval()
 
+        # Move VAE to GPU once — keep it there for all micro-batches
+        self.backbone.move_vae_to(self.device)
+
         data_iter = iter(self.train_dataloader)
         running_loss = 0.0
         global_step = 0
+
+        # Timing accumulators for logging
+        timing_accum = {}
 
         pbar = tqdm(total=self.total_steps, desc="Stage 1 Training")
 
         while global_step < self.total_steps:
             self.optimizer.zero_grad()
+            step_start = time.time()
+
+            # Reset timing accumulators for this step
+            timing_accum = {}
 
             # Gradient accumulation
             for micro_step in range(self.gradient_accumulation_steps):
+                t_data = time.time()
                 try:
                     batch = next(data_iter)
                 except StopIteration:
                     data_iter = iter(self.train_dataloader)
                     batch = next(data_iter)
+                data_load_time = time.time() - t_data
+                timing_accum.setdefault("data_load", []).append(data_load_time)
 
                 metrics = self.train_step(batch)
                 running_loss += metrics["loss"]
+
+                # Accumulate micro-step timings
+                for k, v in metrics.get("timings", {}).items():
+                    timing_accum.setdefault(k, []).append(v)
+
+                # Log every micro-batch so we can see progress in real time
+                micro_timings = metrics.get("timings", {})
+                elapsed = time.time() - step_start
+                print(f"  micro {micro_step+1}/{self.gradient_accumulation_steps} | "
+                      f"data={data_load_time:.2f}s "
+                      f"vae={micro_timings.get('vae_encode', 0):.2f}s "
+                      f"fwd={micro_timings.get('transformer_fwd', 0):.2f}s "
+                      f"bwd={micro_timings.get('backward', 0):.2f}s "
+                      f"gpu_xfer={micro_timings.get('data_to_gpu', 0):.2f}s "
+                      f"| elapsed={elapsed:.1f}s",
+                      flush=True)
+
+            step_time = time.time() - step_start
 
             # Clip gradients and record norm
             trainable_params = [p for p in self.backbone.transformer.parameters() if p.requires_grad]
@@ -214,26 +254,50 @@ class Stage1Trainer:
             # Logging
             if global_step % self.log_every == 0:
                 lr = self.optimizer.param_groups[0]["lr"]
-                pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{lr:.2e}", gnorm=f"{grad_norm:.2f}")
+
+                # Compute average timings across micro-batches
+                avg_timings = {k: sum(v) / len(v) for k, v in timing_accum.items()}
+                total_timings = {k: sum(v) for k, v in timing_accum.items()}
+
+                timing_str = " | ".join(f"{k}={total_timings[k]:.1f}s" for k in sorted(total_timings))
+                print(f"\n  [step {global_step}] step_time={step_time:.1f}s | {timing_str}")
+                print(f"  [step {global_step}] per micro-batch avg: " +
+                      " | ".join(f"{k}={avg_timings[k]:.2f}s" for k in sorted(avg_timings)))
+
+                pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{lr:.2e}", gnorm=f"{grad_norm:.2f}",
+                                 step_s=f"{step_time:.1f}")
 
                 if self.use_wandb:
                     import wandb
-                    wandb.log({
+                    log_dict = {
                         "train/loss": avg_loss,
                         "train/lr": lr,
                         "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                         "train/step": global_step,
-                    })
+                        "perf/step_time_s": step_time,
+                    }
+                    for k, v in avg_timings.items():
+                        log_dict[f"perf/avg_{k}_s"] = v
+                    for k, v in total_timings.items():
+                        log_dict[f"perf/total_{k}_s"] = v
+                    wandb.log(log_dict)
 
             # Save checkpoint + visual validation
             if global_step % self.save_every == 0:
+                # Offload VAE before validation (validation manages its own VAE placement)
+                self.backbone.offload_vae_and_text_encoder("cpu")
                 self._save_checkpoint(global_step)
                 if self.use_wandb:
                     self.validate_visual(global_step)
+                # Move VAE back to GPU for training
+                self.backbone.move_vae_to(self.device)
 
             pbar.update(1)
 
         pbar.close()
+
+        # Offload VAE before final save
+        self.backbone.offload_vae_and_text_encoder("cpu")
 
         # Save final checkpoint
         self._save_checkpoint(global_step, is_final=True)
