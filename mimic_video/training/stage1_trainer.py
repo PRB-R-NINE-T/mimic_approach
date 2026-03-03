@@ -8,6 +8,7 @@ import os
 import math
 import torch
 import torch.nn as nn
+import numpy as np
 from torch.utils.data import DataLoader
 from typing import Dict, Optional
 from tqdm import tqdm
@@ -87,6 +88,9 @@ class Stage1Trainer:
         self.lr_scheduler = self._build_lr_scheduler()
 
         # Wandb logging
+        self.val_every = save_every  # visual validation at same cadence as checkpoints
+        self.ode_steps = 20  # Euler steps for denoising during validation
+
         self.use_wandb = wandb_project is not None
         if self.use_wandb:
             import wandb
@@ -195,9 +199,9 @@ class Stage1Trainer:
                 metrics = self.train_step(batch)
                 running_loss += metrics["loss"]
 
-            # Clip gradients
+            # Clip gradients and record norm
             trainable_params = [p for p in self.backbone.transformer.parameters() if p.requires_grad]
-            torch.nn.utils.clip_grad_norm_(trainable_params, self.grad_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, self.grad_clip)
 
             # Optimizer step
             self.optimizer.step()
@@ -210,19 +214,22 @@ class Stage1Trainer:
             # Logging
             if global_step % self.log_every == 0:
                 lr = self.optimizer.param_groups[0]["lr"]
-                pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{lr:.2e}")
+                pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{lr:.2e}", gnorm=f"{grad_norm:.2f}")
 
                 if self.use_wandb:
                     import wandb
                     wandb.log({
                         "train/loss": avg_loss,
                         "train/lr": lr,
+                        "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
                         "train/step": global_step,
                     })
 
-            # Save checkpoint
+            # Save checkpoint + visual validation
             if global_step % self.save_every == 0:
                 self._save_checkpoint(global_step)
+                if self.use_wandb:
+                    self.validate_visual(global_step)
 
             pbar.update(1)
 
@@ -231,6 +238,93 @@ class Stage1Trainer:
         # Save final checkpoint
         self._save_checkpoint(global_step, is_final=True)
         print(f"Stage 1 training complete. Final checkpoint saved to {self.output_dir}")
+
+    @torch.no_grad()
+    def validate_visual(self, step: int):
+        """Generate predicted video frames and log side-by-side comparison to wandb."""
+        import wandb
+        self.backbone.transformer.eval()
+
+        # Grab one sample from dataloader
+        try:
+            batch = next(iter(self.train_dataloader))
+        except StopIteration:
+            return
+
+        video = batch["video"][:1]  # [1, T, C, H, W]
+        video = video.permute(0, 2, 1, 3, 4).to(self.device)  # [1, C, T, H, W]
+
+        # Encode full video to latents
+        self.backbone.move_vae_to(self.device)
+        z_0 = self.backbone.encode_video(video)  # [1, C_lat, T_lat, H_lat, W_lat]
+
+        z_cond = z_0[:, :, :self.num_cond_latent_frames]
+        z_pred_gt = z_0[:, :, self.num_cond_latent_frames:]
+
+        # Get T5 embedding
+        if self.precomputed_t5_embedding is not None:
+            t5_emb = self.precomputed_t5_embedding.to(self.device, dtype=self.compute_dtype)
+        else:
+            t5_emb = batch["t5_embedding"][:1].to(self.device, dtype=self.compute_dtype)
+
+        # Start from pure noise and denoise via Euler ODE
+        z_noise = torch.randn_like(z_pred_gt)
+
+        def model_fn(z_t, tau):
+            tau_tensor = torch.tensor([tau], device=z_t.device, dtype=z_t.dtype)
+            with torch.amp.autocast("cuda", dtype=self.compute_dtype):
+                raw_out, _ = self.backbone.forward_transformer(
+                    z_noisy=z_t,
+                    z_cond=z_cond,
+                    tau_v=tau_tensor,
+                    encoder_hidden_states=t5_emb,
+                )
+            T_cond = self.num_cond_latent_frames
+            return raw_out[:, :, T_cond:]  # velocity for prediction frames only
+
+        z_pred_denoised = self.fm.ode_solve_euler(
+            model_fn, z_noise, num_steps=self.ode_steps, tau_start=1.0, tau_end=0.0
+        )
+
+        # Decode ground truth and predicted latents to pixels
+        gt_full = self.backbone.decode_video(z_0)  # [1, C, T, H, W]
+        pred_latents = torch.cat([z_cond, z_pred_denoised], dim=2)
+        pred_full = self.backbone.decode_video(pred_latents)  # [1, C, T, H, W]
+
+        self.backbone.offload_vae_and_text_encoder("cpu")
+
+        # Convert to uint8 numpy: [T, H, W, C]
+        def to_video_np(x):
+            x = (x.squeeze(0).permute(1, 2, 3, 0).clamp(-1, 1) * 0.5 + 0.5) * 255
+            return x.cpu().to(torch.uint8).numpy()
+
+        gt_np = to_video_np(gt_full)
+        pred_np = to_video_np(pred_full)
+
+        # Side-by-side: stack horizontally
+        side_by_side = np.concatenate([gt_np, pred_np], axis=2)  # [T, H, 2*W, C]
+
+        wandb.log({
+            "val/video_comparison": wandb.Video(
+                side_by_side.transpose(0, 3, 1, 2),  # [T, C, H, 2*W] for wandb
+                fps=4, caption=f"Left: GT | Right: Predicted (step {step})"
+            ),
+        }, step=step)
+
+        # Also log individual frame grid at the midpoint
+        T = gt_np.shape[0]
+        mid = T // 2
+        frames_to_log = {
+            "val/cond_frame_0": wandb.Image(gt_np[0], caption="Conditioning frame 0"),
+            "val/gt_mid": wandb.Image(gt_np[mid], caption=f"GT frame {mid}"),
+            "val/pred_mid": wandb.Image(pred_np[mid], caption=f"Pred frame {mid}"),
+            "val/gt_last": wandb.Image(gt_np[-1], caption=f"GT frame {T-1}"),
+            "val/pred_last": wandb.Image(pred_np[-1], caption=f"Pred frame {T-1}"),
+        }
+        wandb.log(frames_to_log, step=step)
+
+        self.backbone.transformer.train()
+        print(f"  [val] Visual validation logged to wandb at step {step}")
 
     def _save_checkpoint(self, step: int, is_final: bool = False):
         """Save LoRA checkpoint."""
