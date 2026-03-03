@@ -344,24 +344,27 @@ class CosmosVideoBackbone(nn.Module):
         return output.float(), full_output
 
     def pool_hidden_states(
-        self, hidden_states: torch.Tensor, num_latent_frames: int
+        self, hidden_states: torch.Tensor, num_latent_frames: int, mode: str = "mean"
     ) -> torch.Tensor:
-        """Pool hidden states spatially to [B, T_lat, hidden_dim].
+        """Reduce hidden states for the action decoder's cross-attention.
 
         The hidden states from the transformer block have shape [B, T*H'*W', hidden_dim]
-        where H'=H_lat/patch_h, W'=W_lat/patch_w. We average over the spatial
-        dimensions to get a per-frame representation.
+        where H'=H_lat/patch_h, W'=W_lat/patch_w.
 
         Args:
             hidden_states: [B, T*H'*W', hidden_dim] from the hook.
             num_latent_frames: Number of latent time frames T.
+            mode: "mean" pools spatially to [B, T, D] (5 tokens).
+                  "none" passes all tokens [B, T*H'*W', D] (~6000 tokens).
 
         Returns:
-            Pooled hidden states [B, T, hidden_dim].
+            Hidden states for cross-attention. Shape depends on mode.
         """
+        if mode == "none":
+            return hidden_states  # [B, T*H'*W', D]
+
         B, THW, D = hidden_states.shape
         HW = THW // num_latent_frames
-        # Reshape to [B, T, H'*W', D] and average over spatial
         hidden_states = hidden_states.view(B, num_latent_frames, HW, D)
         pooled = hidden_states.mean(dim=2)  # [B, T, D]
         return pooled

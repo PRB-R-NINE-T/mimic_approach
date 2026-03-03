@@ -87,6 +87,7 @@ class ModelConfig:
 
     # Hidden state extraction
     hidden_state_layer: int = 19  # Layer k=19
+    hidden_state_pool: str = "none"  # "mean" (5 tokens) or "none" (all ~6000 tokens)
 
     # Action decoder
     decoder_hidden_dim: int = 512
